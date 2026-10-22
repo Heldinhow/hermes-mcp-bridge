@@ -110,9 +110,9 @@ async function main() {
 
   const list = await rpc('tools/list', {}, { id: 3 });
   const names = (list.json?.result?.tools || []).map((item) => item.name).sort();
-  const expected = ['hermes_files', 'hermes_result', 'hermes_status', 'hermes_task'];
+  const expected = ['hermes_files', 'hermes_result', 'hermes_status', 'hermes_task', 'list_agents'];
   check(
-    'tools/list exactly 4',
+    'tools/list exactly 5',
     list.response.status === 200 && JSON.stringify(names) === JSON.stringify(expected),
     names.join(','),
   );

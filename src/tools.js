@@ -4,6 +4,8 @@ import { ToolError } from './errors.js';
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const SESSION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const AGENT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export const TOOLS = [
   {
@@ -34,6 +36,19 @@ export const TOOLS = [
           pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$',
           description: 'Optional task id. Generated as gb-YYYYMMDD-HHMMSS-xxxx when omitted.',
         },
+        session: {
+          type: 'string',
+          pattern: '^[a-z0-9][a-z0-9._-]{0,63}$',
+          description:
+            'Optional session name to reuse Hermes conversation state across tasks ' +
+            '(max 64 chars, lowercase). Omit it to keep the task isolated.',
+        },
+        agent: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9_-]{0,31}$',
+          description:
+            'Optional target agent name from list_agents. Omit to use the registry default.',
+        },
       },
       required: ['task', 'mode'],
       additionalProperties: false,
@@ -52,8 +67,25 @@ export const TOOLS = [
           pattern: '^[A-Za-z0-9_-]{1,128}$',
           description: 'The run_id returned by hermes_task with mode=async.',
         },
+        agent: {
+          type: 'string',
+          pattern: '^[a-z][a-z0-9_-]{0,31}$',
+          description:
+            'Optional agent name. Omit to use the agent recorded in the task run.json.',
+        },
       },
       required: ['run_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_agents',
+    description:
+      'List the agents registered for this bridge (read-only, no side effects). Each entry has ' +
+      'name, description, capabilities, kind, available and default. Never includes credentials.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -285,10 +317,19 @@ async function readTextFile(fullPath, maxBytes) {
   }
 }
 
-export function createToolHandlers(config, hermes) {
+export function createToolHandlers(config, hermes, agents) {
   async function hermesTask(args) {
     assertArgs(args);
-    rejectExtra(args, ['task', 'context', 'deliverable', 'constraints', 'mode', 'id']);
+    rejectExtra(args, [
+      'task',
+      'context',
+      'deliverable',
+      'constraints',
+      'mode',
+      'id',
+      'session',
+      'agent',
+    ]);
     const task = requireString(args, 'task', { max: 20000 });
     const context = requireString(args, 'context', { max: 100000, optional: true });
     const deliverable = requireString(args, 'deliverable', { max: 10000, optional: true });
@@ -322,14 +363,59 @@ export function createToolHandlers(config, hermes) {
       }
       id = args.id;
     }
-    return hermes.task({ task, context, deliverable, constraints, mode, id });
+    let session;
+    if (args.session !== undefined) {
+      session = requireString(args, 'session', {
+        max: 64,
+        optional: true,
+        pattern: SESSION_PATTERN,
+      });
+      if (session === undefined) {
+        throw new ToolError('invalid_arguments', 'Campo session não pode ser vazio.');
+      }
+      if (session.startsWith('agent-task-')) {
+        throw new ToolError(
+          'invalid_arguments',
+          'Campo session usa um prefixo reservado (agent-task-).',
+        );
+      }
+    }
+    let agent;
+    if (args.agent !== undefined) {
+      agent = requireString(args, 'agent', {
+        max: 32,
+        optional: true,
+        pattern: AGENT_PATTERN,
+      });
+      if (agent === undefined) {
+        throw new ToolError('invalid_arguments', 'Campo agent não pode ser vazio.');
+      }
+    }
+    return hermes.task({ task, context, deliverable, constraints, mode, id, session, agent });
   }
 
   async function hermesStatus(args) {
     assertArgs(args);
-    rejectExtra(args, ['run_id']);
+    rejectExtra(args, ['run_id', 'agent']);
     const runId = requireString(args, 'run_id', { max: 128, pattern: RUN_ID_PATTERN });
-    return hermes.status(runId);
+    let agent;
+    if (args.agent !== undefined) {
+      agent = requireString(args, 'agent', {
+        max: 32,
+        optional: true,
+        pattern: AGENT_PATTERN,
+      });
+      if (agent === undefined) {
+        throw new ToolError('invalid_arguments', 'Campo agent não pode ser vazio.');
+      }
+    }
+    return hermes.status(runId, agent);
+  }
+
+  async function listAgents(args) {
+    assertArgs(args);
+    rejectExtra(args, []);
+    return agents.listPublic();
   }
 
   async function hermesResult(args) {
@@ -416,6 +502,7 @@ export function createToolHandlers(config, hermes) {
   return {
     hermes_task: hermesTask,
     hermes_status: hermesStatus,
+    list_agents: listAgents,
     hermes_result: hermesResult,
     hermes_files: hermesFiles,
   };

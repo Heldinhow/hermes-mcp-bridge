@@ -80,6 +80,17 @@ export function loadConfig() {
   const hermesPort = positiveInt(hermesEnv.API_SERVER_PORT, 8642, 'API_SERVER_PORT');
   const hermesUrl = `http://${hostForUrl(hermesHost)}:${hermesPort}`;
 
+  // Chaves de agentes vêm só de variável de ambiente ou de arquivo 0600 já carregado aqui:
+  // process.env → .env da bridge → .env do Hermes. O registro guarda apenas o NOME da variável.
+  const envLookup = (name) => {
+    for (const source of [process.env, env, hermesEnv]) {
+      const value = source[name];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return undefined;
+  };
+
+  const agentsFile = resolveMaybeRelative(env.AGENTS_FILE, path.join(os.homedir(), '.hermes', 'agents.yaml'));
   const tasksDir = resolveMaybeRelative(env.TASKS_DIR, path.join(os.homedir(), 'bridge-tasks'));
   const contractPath = resolveMaybeRelative(
     env.HERMES_CONTRACT_PATH,
@@ -94,6 +105,9 @@ export function loadConfig() {
     hermesEnvPath,
     hermesUrl,
     hermesKey,
+    defaultAgentName: 'hermes',
+    agentsFile,
+    envLookup,
     tasksDir,
     contractPath,
     auditLog: resolveMaybeRelative(env.AUDIT_LOG, 'logs/audit.log'),

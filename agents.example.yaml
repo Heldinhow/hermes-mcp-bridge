@@ -1,0 +1,29 @@
+# Registro de agentes da ponte MCP — EXEMPLO versionável (sem chaves).
+# Copy to ~/.hermes/agents.yaml (chmod 600) and adjust endpoints/keys.
+# Chaves NUNCA ficam aqui: use key_env (nome da variável de ambiente) ou key_file (arquivo 0600).
+version: 1
+default: hermes
+agents:
+  - name: hermes
+    description: Hermes principal (perfil default) - tarefas gerais, navegador, cron, Notion.
+    capabilities: [geral, navegador, cron, notion]
+    kind: local
+    profile: default
+    base_url: http://127.0.0.1:8642
+    key_env: API_SERVER_KEY
+  - name: coder
+    description: Agente de codigo (dsh) - plano antes de implementar, testes, git.
+    capabilities: [codigo, dsh, testes, git]
+    kind: local
+    profile: coder
+    # Perfil servido pelo multiplexer do gateway: /p/<perfil> no listener compartilhado.
+    base_url: http://127.0.0.1:8642/p/coder
+    key_env: HERMES_CODER_API_KEY
+  # Agente remoto (só entra quando o endpoint existir). base_url precisa ser https ou
+  # loopback/Tailscale (127.0.0.1, ::1, 100.64.0.0/10, fd7a:115c:a1e0::/48).
+  # - name: remoto
+  #   description: Hermes em outra maquina, exposto por Tailscale.
+  #   capabilities: [geral]
+  #   kind: remote
+  #   base_url: http://100.x.y.z:8642
+  #   key_env: HERMES_REMOTE_API_KEY

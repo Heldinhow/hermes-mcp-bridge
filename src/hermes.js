@@ -113,6 +113,11 @@ export function generateTaskId(now = new Date()) {
   return `gb-${stamp}-${crypto.randomBytes(2).toString('hex')}`;
 }
 
+export function sessionIdFor(args, id, agentName = 'hermes') {
+  // O agente faz parte do namespace: a mesma sessão lógica em agentes diferentes não colide.
+  return args.session ? `gb-sess-${agentName}-${args.session}` : `agent-task-${id}`;
+}
+
 export function publicResult(result) {
   const output = {
     id: result.id,
@@ -125,7 +130,19 @@ export function publicResult(result) {
   return output;
 }
 
-export function createHermes(config) {
+export function createHermes(config, agents) {
+  const registry = agents;
+  const chains = new Map();
+
+  function withSessionLock(key, fn) {
+    const previous = chains.get(key) || Promise.resolve();
+    const current = previous.catch(() => {}).then(fn);
+    chains.set(key, current);
+    return current.finally(() => {
+      if (chains.get(key) === current) chains.delete(key);
+    });
+  }
+
   function readContract() {
     let text;
     try {
@@ -155,19 +172,41 @@ export function createHermes(config) {
     );
   }
 
-  async function requestJson(route, { method = 'GET', body, timeoutMs = 30000 } = {}) {
+  function defaultDest() {
+    if (registry && typeof registry.client === 'function') {
+      try {
+        return registry.client(registry.defaultName());
+      } catch {
+        // Registro degradado sem chave do default: cai na config global (comportamento antigo).
+      }
+    }
+    return { name: config.defaultAgentName || 'hermes', baseUrl: config.hermesUrl, key: config.hermesKey };
+  }
+
+  async function requestJson(
+    route,
+    { method = 'GET', body, headers = {}, timeoutMs = 30000, dest } = {},
+  ) {
+    const target = dest || defaultDest();
+    const requestHeaders = {
+      authorization: `Bearer ${target.key}`,
+      accept: 'application/json',
+      'content-type': 'application/json',
+    };
+    for (const [name, value] of Object.entries(headers || {})) {
+      const key = name.toLowerCase();
+      if (key === 'authorization' || key === 'accept' || key === 'content-type') continue;
+      if (value === undefined || value === null) continue;
+      requestHeaders[name] = String(value);
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let response;
       try {
-        response = await fetch(`${config.hermesUrl}${route}`, {
+        response = await fetch(`${target.baseUrl}${route}`, {
           method,
-          headers: {
-            authorization: `Bearer ${config.hermesKey}`,
-            accept: 'application/json',
-            'content-type': 'application/json',
-          },
+          headers: requestHeaders,
           body: body === undefined ? undefined : JSON.stringify(body),
           redirect: 'error',
           signal: controller.signal,
@@ -262,6 +301,33 @@ export function createHermes(config) {
     return result;
   }
 
+  function persistRunRecord(id, record) {
+    const dir = path.join(config.tasksDir, id);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    const target = path.join(dir, 'run.json');
+    const tmp = path.join(
+      dir,
+      `.run.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`,
+    );
+    fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o644 });
+    try {
+      fs.chmodSync(tmp, 0o644);
+    } catch {
+      // Best effort; the rename below is what matters.
+    }
+    fs.renameSync(tmp, target);
+    return target;
+  }
+
+  function persistRunRecordSafe(id, record) {
+    try {
+      persistRunRecord(id, record);
+    } catch (error) {
+      const code = error && error.code ? error.code : 'unknown';
+      console.error(`[bridge] could not persist run.json for ${id}: ${code}`);
+    }
+  }
+
   function buildTaskPayload(args, id) {
     const payload = { id, task: args.task };
     for (const field of CONTRACT_TASK_FIELDS.slice(1)) {
@@ -286,21 +352,31 @@ export function createHermes(config) {
   async function task(args) {
     const contract = readContract();
     const instructions = systemInstructions(contract);
+    const agentName = args.agent || (registry ? registry.defaultName() : config.defaultAgentName || 'hermes');
+    // resolve() lança unknown_agent / agent_unavailable antes de qualquer chamada upstream.
+    const dest = registry && typeof registry.client === 'function' ? registry.client(agentName) : defaultDest();
     const id = args.id || generateTaskId();
     const payload = buildTaskPayload(args, id);
+    const sessionId = sessionIdFor(args, id, dest.name);
+
+    if (args.id && args.mode === 'async') assertNoDuplicateId(id, dest.name);
 
     if (args.mode === 'async') {
       let runId;
       try {
-        const data = await requestJson('/v1/runs', {
-          method: 'POST',
-          timeoutMs: Math.min(config.hermesTimeoutMs, 60000),
-          body: {
-            input: JSON.stringify(payload),
-            instructions,
-            session_id: `agent-task-${id}`,
-          },
-        });
+        const data = await withSessionLock(sessionId, () =>
+          requestJson('/v1/runs', {
+            method: 'POST',
+            timeoutMs: Math.min(config.hermesTimeoutMs, 60000),
+            headers: { 'Idempotency-Key': id },
+            dest,
+            body: {
+              input: JSON.stringify(payload),
+              instructions,
+              session_id: sessionId,
+            },
+          }),
+        );
         runId = data && typeof data.run_id === 'string' ? data.run_id : undefined;
         if (!runId) {
           throw new HermesError('hermes_missing_run_id', 'Hermes não retornou run_id.');
@@ -314,6 +390,15 @@ export function createHermes(config) {
         persistSafe(id, result);
         return publicResult(result);
       }
+
+      persistRunRecordSafe(id, {
+        run_id: runId,
+        session_id: sessionId,
+        task_id: id,
+        agent: dest.name,
+        agent_base_url: dest.baseUrl,
+        created_at: new Date().toISOString(),
+      });
 
       const result = {
         id,
@@ -335,17 +420,21 @@ export function createHermes(config) {
     let parsed = null;
     let text = '';
     try {
-      const data = await requestJson('/v1/chat/completions', {
-        method: 'POST',
-        timeoutMs: config.hermesTimeoutMs,
-        body: {
-          messages: [
-            { role: 'system', content: instructions },
-            { role: 'user', content: JSON.stringify(payload) },
-          ],
-          stream: false,
-        },
-      });
+      const request = () =>
+        requestJson('/v1/chat/completions', {
+          method: 'POST',
+          timeoutMs: config.hermesTimeoutMs,
+          headers: args.session ? { 'X-Hermes-Session-Id': sessionId } : undefined,
+          dest,
+          body: {
+            messages: [
+              { role: 'system', content: instructions },
+              { role: 'user', content: JSON.stringify(payload) },
+            ],
+            stream: false,
+          },
+        });
+      const data = args.session ? await withSessionLock(sessionId, request) : await request();
       text = normalizeContent(data?.choices?.[0]?.message?.content);
       if (text) parsed = extractJson(text);
     } catch (error) {
@@ -370,9 +459,73 @@ export function createHermes(config) {
     return publicResult(result);
   }
 
-  async function status(runId) {
+  function findRunRecord(runId) {
+    let entries;
+    try {
+      entries = fs.readdirSync(config.tasksDir, { withFileTypes: true });
+    } catch (error) {
+      const code = error && error.code ? error.code : 'unknown';
+      console.error(`[bridge] could not scan tasks dir for run ${runId}: ${code}`);
+      return undefined;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const recordPath = path.join(config.tasksDir, entry.name, 'run.json');
+      let record;
+      try {
+        record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+      } catch (error) {
+        const code = error && error.code ? error.code : 'invalid-json';
+        if (code !== 'ENOENT') {
+          console.error(`[bridge] ignoring ${entry.name}/run.json: ${code}`);
+        }
+        continue;
+      }
+      if (
+        record &&
+        typeof record === 'object' &&
+        record.run_id === runId &&
+        typeof record.task_id === 'string' &&
+        TASK_ID_PATTERN.test(record.task_id)
+      ) {
+        return record;
+      }
+    }
+    return undefined;
+  }
+
+  function findTaskIdByRunId(runId) {
+    const record = findRunRecord(runId);
+    return record ? record.task_id : undefined;
+  }
+
+  // Um id de tarefa pertence a um único agente: o mesmo id em outro agente é recusado.
+  function assertNoDuplicateId(id, agentName) {
+    const recordPath = path.join(config.tasksDir, id, 'run.json');
+    let record;
+    try {
+      record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+    } catch {
+      return;
+    }
+    if (record && typeof record.agent === 'string' && record.agent !== agentName) {
+      throw new ToolError(
+        'duplicate_id',
+        `Tarefa ${id} já foi aceita pelo agente ${record.agent}; use outro id para ${agentName}.`,
+      );
+    }
+  }
+
+  async function status(runId, agentName) {
+    const record = findRunRecord(runId);
+    const name =
+      agentName ||
+      (record && typeof record.agent === 'string' ? record.agent : undefined) ||
+      (registry ? registry.defaultName() : config.defaultAgentName || 'hermes');
+    const dest = registry && typeof registry.client === 'function' ? registry.client(name) : defaultDest();
     const data = await requestJson(`/v1/runs/${encodeURIComponent(runId)}`, {
       timeoutMs: 30000,
+      dest,
     });
     if (!data || typeof data !== 'object') {
       throw new HermesError('hermes_invalid_status', 'Hermes retornou status inválido.');
@@ -380,7 +533,11 @@ export function createHermes(config) {
     const output = {
       run_id: typeof data.run_id === 'string' ? data.run_id : runId,
       status: typeof data.status === 'string' ? data.status : 'unknown',
+      agent: dest.name,
     };
+    if (agentName && record && typeof record.agent === 'string' && record.agent !== agentName) {
+      output.agent_mismatch = `run pertence ao agente ${record.agent}`;
+    }
     for (const field of [
       'completed',
       'partial',
@@ -393,8 +550,8 @@ export function createHermes(config) {
       if (data[field] !== undefined) output[field] = data[field];
     }
 
-    let taskId;
-    if (typeof data.session_id === 'string') {
+    let taskId = findTaskIdByRunId(runId);
+    if (!taskId && typeof data.session_id === 'string') {
       const match = /^agent-task-(.+)$/.exec(data.session_id);
       if (match && TASK_ID_PATTERN.test(match[1])) taskId = match[1];
     }

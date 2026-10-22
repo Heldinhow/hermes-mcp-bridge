@@ -69,7 +69,8 @@ async function dispatchOne(message, ctx) {
           version: ctx.version,
         },
         instructions:
-          'Bridge para o Hermes local. Use hermes_task para enviar tarefas, hermes_status ' +
+          'Bridge para o Hermes local. Use list_agents para descobrir os agentes disponíveis, ' +
+          'hermes_task para enviar tarefas (campos opcionais agent e session), hermes_status ' +
           'para runs assíncronos, hermes_result para o result.json durável e hermes_files ' +
           'para inspecionar artefatos da tarefa.',
       },

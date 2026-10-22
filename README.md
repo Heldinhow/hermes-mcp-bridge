@@ -35,13 +35,42 @@ Node.js >= 18.17, ESM, zero runtime dependencies.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `hermes_task` | `task` (string, required), `mode` (`"sync"` or `"async"`, required), `context`, `deliverable`, `constraints` (array of strings, max 20), `id` (optional) | `{id, status, summary, artifacts, next_steps, run_id?}`. `sync` waits and persists the result; `async` returns `status: "accepted"` plus a `run_id`. |
-| `hermes_status` | `run_id` (string, required) | Run status with `output`, `error`, timestamps, `task_id`, and `result_updated` when available. Terminal states: `completed`, `failed`, `cancelled`, `interrupted`. |
+| `hermes_task` | `task` (string, required), `mode` (`"sync"` or `"async"`, required), `context`, `deliverable`, `constraints` (array of strings, max 20), `id`, `session`, `agent` (all optional) | `{id, status, summary, artifacts, next_steps, run_id?}`. `sync` waits and persists the result; `async` returns `status: "accepted"` plus a `run_id`. |
+| `hermes_status` | `run_id` (string, required), `agent` (optional) | Run status with `output`, `error`, timestamps, `agent`, `task_id`, and `result_updated` when available. Terminal states: `completed`, `failed`, `cancelled`, `interrupted`. |
+| `list_agents` | none | `{agents: [{name, description, capabilities, kind, available, default, local_profile?}], default, count}`. Read-only; never returns credentials. |
 | `hermes_result` | `id` (string, required) | Parsed `result.json`: `{id, status, summary, artifacts, next_steps, details?}`. Durable source of truth after a run leaves the agent API. |
 | `hermes_files` | `id` (string, required), `path` (optional relative path) | A listing `{id, path, entries, count, truncated}` or a UTF-8 file `{id, path, size, mtime, encoding, content}` up to 200 KiB. |
 
 Task ids match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and are generated when omitted. Prefer
 `hermes_result` for final answers and `hermes_files` for artifacts.
+
+## Sessions and agents
+
+Both `session` and `agent` are optional; omitting them keeps the isolated, single-agent
+behavior (`session_id = <prefix>-<id>` on the default agent).
+
+- `session` (`^[a-z0-9][a-z0-9._-]{0,63}$`) reuses conversation state across tasks. The
+  bridge maps it to `gb-sess-<agent>-<session>`, sent as `session_id` on `POST /v1/runs` and
+  as the `X-Hermes-Session-Id` header on `POST /v1/chat/completions`. Calls in the same
+  session are serialized by an in-process lock. Async accepts also send
+  `Idempotency-Key: <id>` and write `<task>/run.json`
+  (`{run_id, session_id, task_id, agent, agent_base_url, created_at}`) right after the accept,
+  so `hermes_status` can resolve `run_id → task_id → agent` without guessing.
+- `agent` selects a registered agent. The registry is a YAML file outside the code
+  (`AGENTS_FILE`, default `~/.hermes/agents.yaml`, mode `600`); `agents.example.yaml` in this
+  repo shows the schema. Each entry has `name`, `description`, `capabilities`, `kind`
+  (`local`/`remote`), `profile`, `base_url`, and `key_env`/`key_file` — the **name** of the
+  variable or the path to a `600` file holding the key, never the key itself.
+- `base_url` must be loopback or Tailscale (`127.0.0.1`, `::1`, `100.64.0.0/10`,
+  `fd7a:115c:a1e0::/48`). A gateway profile served by a multiplexing gateway is addressed as
+  `http://<host>:<port>/p/<profile>`; the bridge appends `/v1/...` and probes `/health`.
+- Unknown agents fail with `unknown_agent` before any upstream call; agents without a
+  resolvable key are listed as `available: false` (`unavailable_reason:
+  "missing_credentials"`) and rejected with `agent_unavailable`. Reusing a task id that
+  belongs to another agent fails with `duplicate_id`.
+- The registry hot-reloads on mtime change; an invalid file keeps the last good state and is
+  reported as `registry_error` in `/health`. A missing file degrades to a synthetic default
+  agent (`degraded: "no_registry"`).
 
 ## Protocol
 
@@ -58,7 +87,7 @@ Task ids match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and are generated when omitted
 - Batches up to 20 are supported. JSON-RPC errors: `-32700` parse, `-32600` invalid
   request, `-32601` unknown method, `-32602` invalid params.
 - `GET /health` (also `HEAD`) is unauthenticated and returns JSON such as
-  `{"status":"ok","service":"hermes-mcp-bridge","version":"1.0.0","tools":4}`.
+  `{"status":"ok","service":"hermes-mcp-bridge","version":"1.0.0","tools":5,"agents":{"default":"hermes","count":2,"available":2}}`.
 - HTTP errors: `401` bad token, `405` non-POST, `413` body too large, `415` wrong content
   type, `429` rate limited with `Retry-After`.
 

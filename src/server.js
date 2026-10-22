@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { createAudit } from './audit.js';
 import { loadConfig } from './config.js';
+import { createAgents } from './agents.js';
 import { createHermes } from './hermes.js';
 import { dispatchRpc } from './mcp.js';
 import { TOOLS, createToolHandlers } from './tools.js';
@@ -133,8 +134,9 @@ function main() {
   const config = loadConfig();
   fs.mkdirSync(path.dirname(config.auditLog), { recursive: true, mode: 0o700 });
   const audit = createAudit(config.auditLog);
-  const hermes = createHermes(config);
-  const handlers = createToolHandlers(config, hermes);
+  const agents = createAgents(config);
+  const hermes = createHermes(config, agents);
+  const handlers = createToolHandlers(config, hermes, agents);
   const isAuthorized = createTokenCheck(config.token);
   const takeRateLimit = createRateLimiter(config.rateLimitPerMin);
 
@@ -176,6 +178,7 @@ function main() {
           version: VERSION,
           uptime_s: Math.floor(process.uptime()),
           tools: TOOLS.length,
+          agents: agents.summary(),
         };
         if (req.method === 'HEAD') {
           res.writeHead(200, {
