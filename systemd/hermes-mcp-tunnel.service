@@ -1,0 +1,31 @@
+[Unit]
+Description=Cloudflare quick tunnel for Hermes MCP Bridge
+Documentation=file://__BRIDGE_DIR__/README.md
+After=network-online.target hermes-mcp-bridge.service
+Wants=network-online.target hermes-mcp-bridge.service
+
+[Service]
+Type=simple
+WorkingDirectory=__BRIDGE_DIR__
+ExecStart=__BRIDGE_DIR__/scripts/run-tunnel.sh
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=10
+Environment=HOME=__HOME__
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__BRIDGE_DIR__
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+StandardOutput=append:__BRIDGE_DIR__/logs/tunnel.out.log
+StandardError=append:__BRIDGE_DIR__/logs/tunnel.err.log
+
+[Install]
+WantedBy=default.target

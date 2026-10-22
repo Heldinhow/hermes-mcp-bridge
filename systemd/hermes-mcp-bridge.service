@@ -1,0 +1,30 @@
+[Unit]
+Description=Hermes MCP Bridge (Streamable HTTP on 127.0.0.1)
+Documentation=file://__BRIDGE_DIR__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__BRIDGE_DIR__
+ExecStart=__NODE__ __BRIDGE_DIR__/src/server.js
+Restart=on-failure
+RestartSec=2
+Environment=NODE_ENV=production
+Environment=HOME=__HOME__
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__BRIDGE_DIR__ __TASKS_DIR__
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+StandardOutput=append:__BRIDGE_DIR__/logs/bridge.out.log
+StandardError=append:__BRIDGE_DIR__/logs/bridge.err.log
+
+[Install]
+WantedBy=default.target

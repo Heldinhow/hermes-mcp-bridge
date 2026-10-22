@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+logs/
+PUBLIC_URL
+PUBLIC_URL.tmp
+bin/cloudflared
+node_modules/
+*.log
