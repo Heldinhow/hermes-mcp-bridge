@@ -90,7 +90,7 @@ Requires Node.js 18.17+ and a local Hermes agent reachable over HTTP with an API
 are no npm dependencies to install.
 
 ```bash
-git clone https://github.com/example/hermes-mcp-bridge.git
+git clone https://github.com/Heldinhow/hermes-mcp-bridge.git
 cd hermes-mcp-bridge
 cp .env.example .env && chmod 600 .env
 node scripts/gen-token.mjs
@@ -142,9 +142,48 @@ in `.env.example`.
 
 ## Exposing it over HTTPS
 
-Keep the bridge on loopback and let a tunnel or proxy terminate TLS. Replace
-`mcp.example.com` below with your own domain; the MCP endpoint becomes
-`https://mcp.example.com/mcp`.
+Keep the bridge on loopback and let a tunnel or proxy terminate TLS. Pick one of the
+options below; the MCP endpoint is always the public HTTPS URL plus `/mcp`.
+
+### Tailscale Funnel (recommended)
+
+If the host is already on a tailnet, Funnel is the shortest path: no extra daemon, no
+DNS records, and a stable hostname that survives restarts.
+
+1. Enable HTTPS certificates and Funnel for your tailnet in the Tailscale admin console
+   (DNS page). Both are off by default.
+2. Expose the local port through Tailscale:
+
+   ```bash
+   tailscale funnel --bg --https=443 http://127.0.0.1:8765
+   ```
+
+   Port `443` gives the bare hostname; other ports also work, e.g.
+   `--https=8443` serves on `:8443` instead. `--bg` persists the configuration across
+   reboots and is not tied to your shell.
+3. Read the URL Tailscale prints and check it:
+
+   ```bash
+   tailscale funnel status
+   curl -s https://<machine>.<tailnet-domain>/health
+   ```
+
+   If you chose a non-443 port, append it to the host before `/health` and `/mcp`.
+
+The MCP URL is `https://<machine>.<tailnet-domain>/mcp` (or `...:<port>/mcp`). Write it to
+`PUBLIC_URL` if you script clients against that file. To revoke the public endpoint:
+
+```bash
+tailscale funnel reset
+```
+
+Note that Funnel makes the bridge reachable from the entire internet, not only from your
+tailnet; the bearer token is the only gate, so keep `.env` at mode `600` and rotate the
+token if it leaks.
+
+`scripts/run-tunnel.sh` and `systemd/hermes-mcp-tunnel.service` implement the Cloudflare
+quick-tunnel alternative below. If you use Funnel, the bridge unit is enough: skip or
+disable the tunnel unit.
 
 ### cloudflared quick tunnel
 
